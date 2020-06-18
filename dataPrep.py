@@ -1,8 +1,40 @@
 import numpy as np
 import pandas as pd
-from sklearn.preprocessing import StandardScaler
-import timeit
 from sklearn.decomposition import PCA
+import sqlite3
+
+
+def prepare_and_save_data(path):
+    preparing_data(path, "SELECT * FROM Match WHERE season LIKE '2015/2016';", "prep_predict.csv")
+    preparing_data(path, "SELECT * FROM Match WHERE season NOT LIKE '2015/2016';", "prep_matches.csv")
+
+
+def preparing_data(path, query, name):
+    conn = sqlite3.connect(path)
+
+    player_attr = pd.read_sql("SELECT * FROM Player_Attributes;", conn)
+    team_attr = pd.read_sql("SELECT * FROM Team_Attributes;", conn)
+    match_data = pd.read_sql(query, conn)
+
+    rows = ["country_id", "league_id", "season", "stage", "date", "match_api_id", "home_team_api_id",
+            "away_team_api_id", "home_team_goal", "away_team_goal", "home_player_1", "home_player_2",
+            "home_player_3", "home_player_4", "home_player_5", "home_player_6", "home_player_7",
+            "home_player_8", "home_player_9", "home_player_10", "home_player_11", "away_player_1",
+            "away_player_2", "away_player_3", "away_player_4", "away_player_5", "away_player_6",
+            "away_player_7", "away_player_8", "away_player_9", "away_player_10", "away_player_11"]
+    match_data.dropna(subset=rows, inplace=True)
+    match_data.drop(match_data.columns.difference(rows), 1, inplace=True)
+
+    # add features of goal ratio and win aspect
+    match_data = goal_handler(match_data)
+
+    # getting all data from teams and players together
+    prep_matches = get_matches(player_attr, match_data, team_attr)
+    del prep_matches['stage']
+    del prep_matches['goal_ratio']
+
+    # save data to disk
+    prep_matches.to_csv(name, encoding='utf-8', index=False)
 
 
 # Add goal ratio and end game status
@@ -12,7 +44,7 @@ def goal_handler(matches):
     i = 0
     for index, row in matches.iterrows():
         if row['away_team_goal'] != 0:
-            ratio_vector.append(row['home_team_goal']/row['away_team_goal'])
+            ratio_vector.append(row['home_team_goal'] / row['away_team_goal'])
         else:
             ratio_vector.append(row['home_team_goal'])
         if ratio_vector[i] > 1:
@@ -28,36 +60,32 @@ def goal_handler(matches):
     return matches
 
 
-def normalize_player_atters(player_data, relevant_player_attrs, player_weights):
-    sc = StandardScaler()
-    overall = []
-    relevant_player_attrs.remove('player_api_id')
-    relevant_player_attrs.remove('date')
+# preparing data of players by choosing 3 most important features with PCA and adding it to matches
+def prepare_players_data_in_match(player_data, matches):
+    player_data.dropna(inplace=True)
     player_data = player_data.sort_values('date').groupby('player_api_id').tail(1).drop('date', axis=1)
-    scaled = sc.fit_transform(player_data.iloc[:, 1:])
-    for row in scaled:
-        sum = 0
-        for i in range (0, len(row)):
-            sum += player_weights[i]*row[i]
-        overall.append(sum / len(row))
-    player_data.drop(relevant_player_attrs, 1, inplace=True)
-    player_data['score'] = overall
-    return player_data
-
-
-# creating a normalized score for each player to analyze his affect on the winning /loosing of the team
-def players_processing(matches, player_data):
-    # normalize score for home
-    start = timeit.default_timer()
-    for index, match in matches.iterrows():
-        # home
-        for player_index in range(1, 12):
-            i = 'home_player_' + str(player_index)
-            match[i] = player_data.loc[player_data.player_api_id == match[i]].loc[:, 'score'].values[0]
-            j = 'away_player_' + str(player_index)
-            match[j] = player_data.loc[player_data.player_api_id == match[j]].loc[:, 'score'].values[0]
-    stop = timeit.default_timer()
-    print('Time: ', stop - start)
+    for column in player_data:
+        if column != 'date' and not np.issubdtype(player_data[column].dtype, np.number):
+            player_data.drop(column, axis=1, inplace=True)
+    ids = player_data['player_api_id'].values
+    player_data.drop(player_data.columns[0:3], axis=1, inplace=True)
+    pca = PCA(n_components=2, svd_solver='full')
+    principalComponents = pca.fit_transform(player_data)
+    principalDf = pd.DataFrame(data=principalComponents)
+    principalDf['player_api_id'] = ids
+    for i in range(1, 12):
+        principalDf = principalDf.rename(
+            columns={0: "home_player_" + str(i) + "_f1", 1: "home_player_" + str(i) + "_f2"})
+        matches = matches.set_index('home_player_' + str(i)).join(principalDf.set_index('player_api_id'))
+        principalDf = principalDf.rename(
+            columns={"home_player_" + str(i) + "_f1": 0, "home_player_" + str(i) + "_f2": 1})
+    for i in range(1, 12):
+        principalDf = principalDf.rename(
+            columns={0: "away_player_" + str(i) + "_f1", 1: "away_player_" + str(i) + "_f2"})
+        matches = matches.set_index('away_player_' + str(i)).join(principalDf.set_index('player_api_id'))
+        principalDf = principalDf.rename(
+            columns={"away_player_" + str(i) + "_f1": 0, "away_player_" + str(i) + "_f2": 1})
+    matches.dropna(inplace=True)
     return matches
 
 
@@ -72,91 +100,35 @@ def fill_team_na(row, mean_values):
     return normal
 
 
-def clean_team_data(teams, team_weights):
-    sc = StandardScaler()
-    teams.drop('team_fifa_api_id', axis=1, inplace=True)
-    teams.drop('id', axis=1, inplace=True)
-    mean_values = teams.groupby('buildUpPlayDribblingClass').mean().loc[:, 'buildUpPlayDribbling'].values
-    teams['buildUpPlayDribbling'] = teams.apply(
-        lambda row: fill_team_na(row, mean_values) if np.isnan(row['buildUpPlayDribbling']) else row['buildUpPlayDribbling'], axis=1)
-    for column in teams:
-        if column != 'date' and not np.issubdtype(teams[column].dtype, np.number):
-            teams.drop(column, axis=1, inplace=True)
-    teams = teams.sort_values('date').groupby('team_api_id').tail(1).drop('date', axis=1)
-    scaled = sc.fit_transform(teams.iloc[:, 1:])
-    team_scores = team_processing(scaled, team_weights)
-    # scaled_features_df = pd.DataFrame(np.column_stack([teams['team_api_id'], team_scores]), columns={"team_api_id", "scores"})
-    scaled_features_df = pd.DataFrame({"team_api_id": teams['team_api_id'] , "scores" :team_scores})
-    # scaled_features_df = scaled_features_df.astype({'team_api_id': 'int64'})
-    return scaled_features_df
-
-
-def team_processing(scaled_teams, team_weights):
-    overall = []
-    for row in scaled_teams:
-        sum = 0
-        for i in range (0, len(row)):
-            sum += team_weights[i]*row[i]
-        overall.append(sum / len(row))
-    return overall
-
-
-def assign(row, overall):
-    row['home_team_score'] = overall[row['home_team_score']]
-    row['away_team_score'] = overall[row['away_team_score']]
-
-
-def insert_team_scores(matches, overall):
-    #renaming columns of teams
-    matches = matches.rename(columns={"home_team_api_id": "home_team_score", "away_team_api_id": "away_team_score"})
-    # normalize score for home
-    start = timeit.default_timer()
-    x = pd.Series(overall.scores.values, index=overall.team_api_id).to_dict()
-    print(len(x))
-    print(matches.shape)
-    matches = matches[matches.home_team_score.isin(x)]
-    matches = matches[matches.away_team_score.isin(x)]
-    matches.apply(lambda row: assign(row, x), axis=1)
-    print(matches.shape)
-    stop = timeit.default_timer()
-    print('Time: ', stop - start)
-    return matches
-
-
-def prepare_players_data_in_match(player_attr, relevant_player_attrs, player_weights, match_data):
-    player_attr.dropna(subset=relevant_player_attrs, inplace=True)
-    player_attr.drop(player_attr.columns.difference(relevant_player_attrs), 1, inplace=True)
-    player_attr = normalize_player_atters(player_attr, relevant_player_attrs, player_weights)
-    match_data = players_processing(match_data, player_attr)
-    return match_data
-
-
 def prepare_teams_data_in_match(matches, teams):
     teams.drop('team_fifa_api_id', axis=1, inplace=True)
     teams.drop('id', axis=1, inplace=True)
     mean_values = teams.groupby('buildUpPlayDribblingClass').mean().loc[:, 'buildUpPlayDribbling'].values
     teams['buildUpPlayDribbling'] = teams.apply(
-        lambda row: fill_team_na(row, mean_values) if np.isnan(row['buildUpPlayDribbling']) else row['buildUpPlayDribbling'], axis=1)
+        lambda row: fill_team_na(row, mean_values) if np.isnan(row['buildUpPlayDribbling']) else row[
+            'buildUpPlayDribbling'], axis=1)
     for column in teams:
         if column != 'date' and not np.issubdtype(teams[column].dtype, np.number):
             teams.drop(column, axis=1, inplace=True)
     teams = teams.sort_values('date').groupby('team_api_id').tail(1).drop('date', axis=1)
     ids = teams['team_api_id'].values
     teams.drop('team_api_id', axis=1, inplace=True)
-    pca = PCA(n_components=5, svd_solver='full')
+    pca = PCA(n_components=3, svd_solver='full')
     principalComponents = pca.fit_transform(teams)
     principalDf = pd.DataFrame(data=principalComponents)
     principalDf['team_api_id'] = ids
-    principalDf = principalDf.rename(columns={"team_api_id": "team_api_id", 0: "home_f_1", 1: "home_f_2", 2: "home_f_3", 3: "home_f_4", 4: "home_f_5"})
+    principalDf = principalDf.rename(
+        columns={0: "home_f_1", 1: "home_f_2", 2: "home_f_3"})
     matches = matches.set_index('home_team_api_id').join(principalDf.set_index('team_api_id'))
-    principalDf = principalDf.rename(columns={"home_f_1": "away_f_1", "home_f_2": "away_f_2", "home_f_3": "away_f_3", "home_f_4": "away_f_4", "home_f_5": "away_f_5"})
+    principalDf = principalDf.rename(
+        columns={"home_f_1": "away_f_1", "home_f_2": "away_f_2", "home_f_3": "away_f_3"})
     matches = matches.set_index('away_team_api_id').join(principalDf.set_index('team_api_id'))
-    matches.dropna( inplace=True)
+    matches.dropna(inplace=True)
     return matches
 
 
-def get_matches(player_attr, relevant_player_attrs, player_weights, match_data, teams):
-    match_data = prepare_players_data_in_match(player_attr, relevant_player_attrs, player_weights, match_data)
+def get_matches(player_attr, match_data, teams):
+    match_data = prepare_players_data_in_match(player_attr, match_data)
     match_data = prepare_teams_data_in_match(match_data, teams)
     match_data.drop(['country_id', 'league_id', 'season', 'date', 'match_api_id'], axis=1, inplace=True)
     return match_data

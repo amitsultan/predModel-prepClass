@@ -1,42 +1,43 @@
-import sqlite3
 import pandas as pd
-import dataPrep as prep
-import numpy
-import torch
-import torch.nn as nn
-import torch.optim as optim
-import torchbnn as bnn
-from sklearn.model_selection import train_test_split
+from sklearn.ensemble import GradientBoostingClassifier
+from sklearn.ensemble import AdaBoostClassifier
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.naive_bayes import GaussianNB
+from sklearn.neighbors import KNeighborsClassifier
+from sklearn.ensemble import GradientBoostingRegressor
+
+from sklearn import linear_model
+import warnings
+warnings.simplefilter("ignore")
+
+from sklearn.metrics import accuracy_score
+df_train = pd.read_csv("prep_matches.csv")
+df_test = pd.read_csv("prep_predict.csv")
 
 
-conn = sqlite3.connect('input/database.sqlite')
+RF_clf = RandomForestClassifier(n_estimators = 200, random_state = 1, class_weight = 'balanced')
+AB_clf = AdaBoostClassifier(n_estimators = 200, random_state = 2)
+GNB_clf = GaussianNB()
+KNN_clf =  KNeighborsClassifier()
+LOG_clf = linear_model.LogisticRegression(multi_class = "ovr", solver = "sag", class_weight = 'balanced')
+GRAD_clf = GradientBoostingClassifier(random_state=0)
+EST_clf = GradientBoostingRegressor(n_estimators=100, learning_rate=0.1,max_depth=1, random_state=0, loss='ls')
 
-player_attr = pd.read_sql("SELECT * FROM Player_Attributes;", conn)
-team_attr = pd.read_sql("SELECT * FROM Team_Attributes;", conn)
-match_data = pd.read_sql("SELECT * FROM Match;", conn)
+clfs = [GRAD_clf, LOG_clf, RF_clf, AB_clf, GNB_clf, KNN_clf]
+from sklearn.metrics import mean_squared_error
+y_train = df_train.pop('status')
+X_train = df_train
+y_test = df_test.pop('status')
+X_test = df_test
 
+EST_clf.fit(X_train, y_train)
 
-rows = ["country_id", "league_id", "season", "stage", "date", "match_api_id", "home_team_api_id",
-        "away_team_api_id", "home_team_goal", "away_team_goal", "home_player_1", "home_player_2",
-        "home_player_3", "home_player_4", "home_player_5", "home_player_6", "home_player_7",
-        "home_player_8", "home_player_9", "home_player_10", "home_player_11", "away_player_1",
-        "away_player_2", "away_player_3", "away_player_4", "away_player_5", "away_player_6",
-        "away_player_7", "away_player_8", "away_player_9", "away_player_10", "away_player_11"]
-match_data.dropna(subset=rows, inplace=True)
-match_data.drop(match_data.columns.difference(rows), 1, inplace=True)
-
-# add features of goal ratio and win aspect
-match_data = prep.goal_handler(match_data)
-
-# Normalizing player attributes and
-relevant_player_attrs = ["player_api_id", "date", "overall_rating", "potential", "crossing"]
-# Weights for player and teams attributes
-player_weights = [0.4, 0.4, 0.2]
-
-prep_matches = prep.get_matches(player_attr, relevant_player_attrs, player_weights, match_data, team_attr)
-
-train, test = train_test_split(prep_matches, test_size=0.2)
-
-print(prep_matches.shape)
-print(prep_matches.columns)
-print(prep_matches)
+for model in clfs:
+    model.fit(X_train, y_train)
+    expected = y_test
+    predicted = model.predict(X_test)
+    # print("Score of {} for training set: {:.4f}.".format(model.__class__.__name__, accuracy_score(y_train, model.predict(X_train))))
+    print("Score of {} for test set: {:.4f}.".format(model.__class__.__name__, accuracy_score(y_test, model.predict(X_test))))
+    # summarize the fit of the model
+    # print(metrics.classification_report(expected, predicted))
+    # print(metrics.confusion_matrix(expected, predicted))
