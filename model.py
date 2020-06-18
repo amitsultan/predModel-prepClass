@@ -6,6 +6,7 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 import torchbnn as bnn
+from sklearn.model_selection import train_test_split
 
 
 conn = sqlite3.connect('input/database.sqlite')
@@ -31,9 +32,11 @@ match_data = prep.goal_handler(match_data)
 relevant_player_attrs = ["player_api_id", "date", "overall_rating", "potential", "crossing"]
 # Weights for player and teams attributes
 player_weights = [0.4, 0.4, 0.2]
-teams_weights = [1/9, 1/9, 1/9, 1/9, 1/9, 1/9, 1/9, 1/9, 1/9]
-# match_data = prep.prepare_players_data_in_match(player_attr, relevant_player_attrs, player_weights, match_data)
 
-# print(match_data)
-# clean team data and add missing values based on mean
-prep.prepare_teams_data_in_match(match_data, team_attr, teams_weights)
+prep_matches = prep.get_matches(player_attr, relevant_player_attrs, player_weights, match_data, team_attr)
+
+train, test = train_test_split(prep_matches, test_size=0.2)
+
+print(prep_matches.shape)
+print(prep_matches.columns)
+print(prep_matches)

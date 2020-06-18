@@ -2,6 +2,7 @@ import numpy as np
 import pandas as pd
 from sklearn.preprocessing import StandardScaler
 import timeit
+from sklearn.decomposition import PCA
 
 
 # Add goal ratio and end game status
@@ -23,7 +24,7 @@ def goal_handler(matches):
         i += 1
     matches['goal_ratio'] = ratio_vector
     matches['status'] = status_vector
-    matches.drop(['home_team_goal', 'away_team_goal'], axis=1)
+    matches.drop(['home_team_goal', 'away_team_goal'], axis=1, inplace=True)
     return matches
 
 
@@ -71,14 +72,6 @@ def fill_team_na(row, mean_values):
     return normal
 
 
-def prepare_players_data_in_match(player_attr, relevant_player_attrs, player_weights, match_data):
-    player_attr.dropna(subset=relevant_player_attrs, inplace=True)
-    player_attr.drop(player_attr.columns.difference(relevant_player_attrs), 1, inplace=True)
-    player_attr = normalize_player_atters(player_attr, relevant_player_attrs, player_weights)
-    match_data = players_processing(match_data, player_attr)
-    return match_data
-
-
 def clean_team_data(teams, team_weights):
     sc = StandardScaler()
     teams.drop('team_fifa_api_id', axis=1, inplace=True)
@@ -107,9 +100,11 @@ def team_processing(scaled_teams, team_weights):
         overall.append(sum / len(row))
     return overall
 
+
 def assign(row, overall):
     row['home_team_score'] = overall[row['home_team_score']]
     row['away_team_score'] = overall[row['away_team_score']]
+
 
 def insert_team_scores(matches, overall):
     #renaming columns of teams
@@ -128,7 +123,40 @@ def insert_team_scores(matches, overall):
     return matches
 
 
-def prepare_teams_data_in_match(matches, teams, team_weights):
-    teams_scores = clean_team_data(teams, team_weights)
-    matches = insert_team_scores(matches, teams_scores)
+def prepare_players_data_in_match(player_attr, relevant_player_attrs, player_weights, match_data):
+    player_attr.dropna(subset=relevant_player_attrs, inplace=True)
+    player_attr.drop(player_attr.columns.difference(relevant_player_attrs), 1, inplace=True)
+    player_attr = normalize_player_atters(player_attr, relevant_player_attrs, player_weights)
+    match_data = players_processing(match_data, player_attr)
+    return match_data
 
+
+def prepare_teams_data_in_match(matches, teams):
+    teams.drop('team_fifa_api_id', axis=1, inplace=True)
+    teams.drop('id', axis=1, inplace=True)
+    mean_values = teams.groupby('buildUpPlayDribblingClass').mean().loc[:, 'buildUpPlayDribbling'].values
+    teams['buildUpPlayDribbling'] = teams.apply(
+        lambda row: fill_team_na(row, mean_values) if np.isnan(row['buildUpPlayDribbling']) else row['buildUpPlayDribbling'], axis=1)
+    for column in teams:
+        if column != 'date' and not np.issubdtype(teams[column].dtype, np.number):
+            teams.drop(column, axis=1, inplace=True)
+    teams = teams.sort_values('date').groupby('team_api_id').tail(1).drop('date', axis=1)
+    ids = teams['team_api_id'].values
+    teams.drop('team_api_id', axis=1, inplace=True)
+    pca = PCA(n_components=5, svd_solver='full')
+    principalComponents = pca.fit_transform(teams)
+    principalDf = pd.DataFrame(data=principalComponents)
+    principalDf['team_api_id'] = ids
+    principalDf = principalDf.rename(columns={"team_api_id": "team_api_id", 0: "home_f_1", 1: "home_f_2", 2: "home_f_3", 3: "home_f_4", 4: "home_f_5"})
+    matches = matches.set_index('home_team_api_id').join(principalDf.set_index('team_api_id'))
+    principalDf = principalDf.rename(columns={"home_f_1": "away_f_1", "home_f_2": "away_f_2", "home_f_3": "away_f_3", "home_f_4": "away_f_4", "home_f_5": "away_f_5"})
+    matches = matches.set_index('away_team_api_id').join(principalDf.set_index('team_api_id'))
+    matches.dropna( inplace=True)
+    return matches
+
+
+def get_matches(player_attr, relevant_player_attrs, player_weights, match_data, teams):
+    match_data = prepare_players_data_in_match(player_attr, relevant_player_attrs, player_weights, match_data)
+    match_data = prepare_teams_data_in_match(match_data, teams)
+    match_data.drop(['country_id', 'league_id', 'season', 'date', 'match_api_id'], axis=1, inplace=True)
+    return match_data
